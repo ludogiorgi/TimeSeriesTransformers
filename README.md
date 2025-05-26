@@ -18,7 +18,7 @@ This project implements transformer neural networks for predicting time series d
 ## Project Structure
 
 ```
-Transformers/
+TimeSeriesTransformers/
 ├── src/
 │   ├── analysis_callback.jl    # Comprehensive model analysis and visualization
 │   ├── ensemble_predict.jl     # Ensemble prediction utilities
@@ -54,7 +54,7 @@ Transformers/
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd Transformers
+cd TimeSeriesTransformers
 ```
 
 2. Install required Julia packages:
@@ -67,7 +67,8 @@ Pkg.add(["Flux", "Plots", "Statistics", "StatsBase", "KernelDensity", "Random"])
 
 ### Basic Model Training
 ```julia
-using .Transformers
+include("src/transformer_model.jl")
+include("src/data_processing.jl")
 
 # Load and preprocess data
 processor = TimeSeriesProcessor(data, n_clusters=10)
@@ -80,6 +81,8 @@ train!(model, X_train, y_train, epochs=100)
 
 ### Comprehensive Analysis
 ```julia
+include("src/analysis_callback.jl")
+
 # Initialize analysis parameters for reproducibility
 initialize_analysis_params!(X_val, y_val)
 
@@ -93,6 +96,8 @@ fig = comprehensive_analysis_callback(
 
 ### Ensemble Predictions
 ```julia
+include("src/ensemble_predict.jl")
+
 # Generate ensemble forecasts
 trajectories, values = ensemble_predict(
     model, processor, initial_sequence, 
