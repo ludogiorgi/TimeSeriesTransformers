@@ -58,15 +58,12 @@ function train_with_validation!(model::TransformerModel, X_train, y_train, X_val
                                 l2_reg::Float32=0.0f0,
                                 verbose::Bool=true,
                                 plot_training::Bool=true,
-                                display_plots::Bool=false,  # New parameter to control plot display
-                                # New batch sampling parameter
+                                display_plots::Bool=false,
                                 n_batches_per_epoch::Int=50,
-                                # Existing checkpoint parameters
                                 checkpoint_dir::String="checkpoints",
                                 checkpoint_frequency::Int=10,
                                 resume_from_checkpoint::Bool=false,
                                 checkpoint_filename::String="model_checkpoint",
-                                # Analysis callback parameters
                                 analysis_callback_frequency::Int=0,
                                 processor=nothing,
                                 y_data=nothing)
@@ -178,9 +175,13 @@ function train_with_validation!(model::TransformerModel, X_train, y_train, X_val
             X_batch = X_train[idx]
             y_batch = y_train[idx]
             
-            # Calculate gradients using the dedicated loss function
+            # Prepare autoregressive batch data
+            vocab_size = processor !== nothing ? processor.vocab_size : 10  # fallback
+            X_ar, y_ar = prepare_autoregressive_batch(X_batch, y_batch, vocab_size)
+            
+            # Calculate gradients using the autoregressive loss function
             loss, gs = Flux.withgradient(ps) do
-                transformer_loss(model, X_batch, y_batch; l2_reg=l2_reg)
+                transformer_loss(model, X_ar, y_ar; l2_reg=l2_reg)
             end
             
             # Apply gradient clipping if specified
@@ -203,8 +204,10 @@ function train_with_validation!(model::TransformerModel, X_train, y_train, X_val
         avg_train_loss = epoch_loss / batch_count
         push!(train_losses, avg_train_loss)
         
-        # Validation phase using the same loss function
-        val_loss = transformer_loss(model, X_val, y_val; l2_reg=l2_reg)
+        # Validation phase using the same autoregressive loss function
+        vocab_size = processor !== nothing ? processor.vocab_size : 10  # fallback
+        X_val_ar, y_val_ar = prepare_autoregressive_batch(X_val, y_val, vocab_size)
+        val_loss = transformer_loss(model, X_val_ar, y_val_ar; l2_reg=l2_reg)
         push!(val_losses, val_loss)
         
         if verbose && (epoch ≤ 5 || epoch % 10 == 0)
@@ -422,7 +425,8 @@ end
 """
     transformer_loss(model, X, y; l2_reg=0.0)
 
-Compute cross-entropy loss for transformer model with optional L2 regularization.
+Compute autoregressive loss for transformer model with causal masking.
+Each position in the sequence predicts the next token, with loss computed on all valid predictions.
 Temporarily disables threading during forward pass for gradient compatibility.
 """
 function transformer_loss(model::TransformerModel, X::AbstractArray, y::AbstractArray; l2_reg::Float32=0.0f0)
@@ -430,18 +434,49 @@ function transformer_loss(model::TransformerModel, X::AbstractArray, y::Abstract
     old_threading = USE_THREADING[]
     set_threading(false)
     
+    # X shape: (vocab_size, sequence_length, batch_size)
+    # y shape: (sequence_length, batch_size) - targets for each position
+    
     # Forward pass
-    output = model(X)
+    output = model(X)  # Shape: (vocab_size, sequence_length, batch_size)
     
     # Apply softmax to get probabilities
-    probs = softmax(output, dims=1)
+    probs = softmax(output, dims=1)  # Shape: (vocab_size, sequence_length, batch_size)
     
-    # Compute cross-entropy loss
-    target = Flux.onehotbatch(y, 1:size(probs, 1))
-    ce_loss = -mean(sum(target .* log.(probs .+ Float32(1e-8)), dims=1))
+    # Prepare targets - each position predicts the next token
+    # For position i, we predict y[i+1], so we need to shift targets
+    seq_len = size(X, 2)
+    batch_size = size(X, 3)
+    vocab_size = size(output, 1)
+    
+    total_loss = Float32(0)
+    valid_predictions = 0
+    
+    # Compute loss for each position (except the last one, which has no target)
+    for pos in 1:(seq_len-1)
+        # Get predictions at position pos
+        pred_logits = output[:, pos, :]  # Shape: (vocab_size, batch_size)
+        pred_probs = probs[:, pos, :]    # Shape: (vocab_size, batch_size)
+        
+        # Get targets (next tokens) - y[pos+1] for each batch
+        targets = y[pos+1, :]  # Shape: (batch_size,)
+        
+        # Convert targets to one-hot encoding
+        target_onehot = Flux.onehotbatch(targets, 1:vocab_size)  # Shape: (vocab_size, batch_size)
+        
+        # Compute cross-entropy loss for this position
+        pos_loss = -mean(sum(target_onehot .* log.(pred_probs .+ Float32(1e-8)), dims=1))
+        
+        total_loss += pos_loss
+        valid_predictions += 1
+    end
+    
+    # Average loss across all valid predictions
+    if valid_predictions > 0
+        total_loss = total_loss / valid_predictions
+    end
     
     # Add L2 regularization if specified
-    total_loss = ce_loss
     if l2_reg > 0
         l2_penalty = Float32(0)
         for layer in model.encoder.layers
@@ -461,4 +496,64 @@ function transformer_loss(model::TransformerModel, X::AbstractArray, y::Abstract
     set_threading(old_threading)
     
     return total_loss
+end
+
+"""
+    prepare_autoregressive_targets(y_sequence)
+
+Prepare targets for autoregressive training where each position predicts the next token.
+Input: sequence of shape (sequence_length,)
+Output: input and target sequences for autoregressive training
+"""
+function prepare_autoregressive_targets(y_sequence::AbstractVector)
+    seq_len = length(y_sequence)
+    
+    # Input sequence: all tokens except the last
+    input_seq = y_sequence[1:end-1]
+    
+    # Target sequence: all tokens except the first  
+    target_seq = y_sequence[2:end]
+    
+    return input_seq, target_seq
+end
+
+"""
+    prepare_autoregressive_batch(X_batch, y_batch)
+
+Prepare a batch for autoregressive training.
+X_batch: Vector of input sequences (Vector{Vector{Int}})
+y_batch: Vector of target sequences (Vector{Vector{Int}})
+"""
+function prepare_autoregressive_batch(X_batch::AbstractVector, y_batch::AbstractVector, vocab_size::Int)
+    # If y_batch contains sequences (new format), use them directly
+    if isa(y_batch[1], AbstractVector)
+        batch_size = length(X_batch)
+        seq_len = length(X_batch[1])
+        
+        return create_autoregressive_batch_tensor(X_batch, y_batch, vocab_size)
+    else
+        # Fallback for old format (single target values)
+        batch_size = length(X_batch)
+        seq_len = length(X_batch[1])
+        
+        # Create input tensor: (vocab_size, sequence_length, batch_size)
+        X_tensor = zeros(Float32, vocab_size, seq_len, batch_size)
+        
+        # Create target tensor: (sequence_length, batch_size)
+        y_tensor = zeros(Int, seq_len, batch_size)
+        
+        for i in 1:batch_size
+            # Convert input sequence to one-hot
+            for t in 1:seq_len
+                X_tensor[X_batch[i][t], t, i] = 1.0f0
+            end
+            
+            # For targets, create autoregressive sequence
+            # Shift input sequence by one position for targets
+            y_tensor[1:end-1, i] = X_batch[i][2:end]
+            y_tensor[end, i] = y_batch[i]  # Last target is the provided target
+        end
+        
+        return X_tensor, y_tensor
+    end
 end

@@ -50,8 +50,14 @@ export train_transformer!, train_and_evaluate!
 export generate_lorenz63_data
 export get_sequence_dataset
 
+# Export new autoregressive functions
+export prepare_autoregressive_targets, prepare_autoregressive_batch
+export create_autoregressive_batch_tensor
+export predict_next_token, generate_sequence, predict_sequence_continuation
+export sample_from_distribution
+
 # Export utility functions from prediction_utils
-export generate, predict, ensemble_predict, compute_validation_accuracy
+export generate, ensemble_predict, compute_validation_accuracy
 
 # Export transformer components
 export TransformerModel, MultiHeadAttention, FeedForward
@@ -67,7 +73,8 @@ export train_with_validation!, train_and_evaluate!
 # Export utility functions
 export save_model, load_model, set_threading
 
-# Export analysis callback
+# Export analysis callback and evaluation functions
 export comprehensive_analysis_callback, autocorrelation, initialize_analysis_params!
+export evaluate_autoregressive_model
 
 end # module

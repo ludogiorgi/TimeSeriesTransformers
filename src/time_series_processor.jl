@@ -17,6 +17,9 @@ mutable struct TimeSeriesProcessor
     cluster_assignments::Vector{Int} # Cluster assignments for each time point
     data_mean::Float64              # Mean of original data for denormalization
     data_std::Float64               # Standard deviation of original data for denormalization
+    sequences::Vector{Vector{Int}}  # Autoregressive sequences
+    vocab_size::Int                 # Vocabulary size for embedding
+    vocab_to_value::Dict{Int, Float64} # Mapping from cluster index to representative value
     
     """
         TimeSeriesProcessor(data, num_clusters)
@@ -40,7 +43,7 @@ mutable struct TimeSeriesProcessor
         normalized_data = (time_series .- data_mean) ./ data_std
         
         # Initialize with empty clustering results
-        new(time_series, normalized_data, num_clusters, nothing, Float64[], Int[], data_mean, data_std)
+        new(time_series, normalized_data, num_clusters, nothing, Float64[], Int[], data_mean, data_std, Vector{Vector{Int}}(), 0, Dict{Int, Float64}())
     end
 
     # Constructor with keyword arguments
@@ -151,44 +154,82 @@ function process(processor::TimeSeriesProcessor)
         error("NaN values detected in clustering results")
     end
     
+    # Set up vocabulary
+    processor.vocab_size = length(processor.cluster_centers)
+    processor.vocab_to_value = Dict{Int, Float64}()
+    for (idx, center) in enumerate(processor.cluster_centers)
+        processor.vocab_to_value[idx] = center
+    end
+    
+    # Create sequences from cluster assignments
+    processor.sequences = [processor.cluster_assignments]  # For now, just use the full sequence
+
     return processor.cluster_assignments
 end
 
 """
-    get_sequence_dataset(processor::TimeSeriesProcessor, sequence_length::Int)
+    get_sequence_dataset(processor, sequence_length)
 
-Process the time series data into sequences for training.
-
-# Arguments
-- `processor`: TimeSeriesProcessor instance
-- `sequence_length`: Length of sequences to create
-
-# Returns
-- Tuple of (X, y) where X is a vector of sequences and y is a vector of next values
+Create autoregressive training dataset where each sequence predicts the next token at each position.
+Returns sequences prepared for autoregressive transformer training.
 """
 function get_sequence_dataset(processor::TimeSeriesProcessor, sequence_length::Int)
+    
     # Ensure clustering has been performed
     if isempty(processor.cluster_assignments) || isnothing(processor.kmeans_model)
         @info "Running clustering before getting sequences..."
         process(processor)
     end
+    sequences = processor.sequences
+    vocab_size = processor.vocab_size
     
-    # Get cluster assignments
-    clusters = processor.cluster_assignments
+    X = Vector{Vector{Int}}()
+    y = Vector{Vector{Int}}()  # Changed to return sequence targets instead of single values
     
-    # Create sequences and targets
-    X = Vector{Int}[]
-    y = Int[]
-    
-    # Iterate through the data to create sequences
-    for i in 1:(length(clusters) - sequence_length)
-        sequence = clusters[i:(i + sequence_length - 1)]
-        next_value = clusters[i + sequence_length]
-        push!(X, sequence)
-        push!(y, next_value)
+    for seq in sequences
+        if length(seq) >= sequence_length + 1  # Need +1 for autoregressive targets
+            for i in 1:(length(seq) - sequence_length)
+                # Input sequence
+                input_seq = seq[i:(i + sequence_length - 1)]
+                # Target sequence (shifted by one position)
+                target_seq = seq[(i + 1):(i + sequence_length)]
+                
+                push!(X, input_seq)
+                push!(y, target_seq)
+            end
+        end
     end
     
     return X, y
+end
+
+"""
+    create_autoregressive_batch_tensor(X_batch, y_batch, vocab_size)
+
+Convert batch of sequences to tensors for autoregressive training.
+Returns properly formatted tensors for the transformer model.
+"""
+function create_autoregressive_batch_tensor(X_batch::Vector{Vector{Int}}, y_batch::Vector{Vector{Int}}, vocab_size::Int)
+    batch_size = length(X_batch)
+    seq_len = length(X_batch[1])
+    
+    # Create input tensor: (vocab_size, sequence_length, batch_size)
+    X_tensor = zeros(Float32, vocab_size, seq_len, batch_size)
+    
+    # Create target tensor: (sequence_length, batch_size)
+    y_tensor = zeros(Int, seq_len, batch_size)
+    
+    for i in 1:batch_size
+        # Convert input sequence to one-hot
+        for t in 1:seq_len
+            X_tensor[X_batch[i][t], t, i] = 1.0f0
+        end
+        
+        # Set target sequence
+        y_tensor[:, i] = y_batch[i]
+    end
+    
+    return X_tensor, y_tensor
 end
 
 """

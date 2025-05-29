@@ -471,9 +471,17 @@ function (model::TransformerModel)(x; use_causal_mask=true)
     # Apply transformer encoder with mask
     encoded = model.encoder(x_embedded, mask)
     
-    # Get last sequence element and project to output space
-    last_element = encoded[:, end, :]
-    model.output(last_element)
+    # For autoregressive training, we need predictions at all positions
+    # Apply output projection to each position
+    d_model, seq_len, batch_size = size(encoded)
+    
+    # Reshape to apply output layer: (d_model, seq_len * batch_size)
+    encoded_flat = reshape(encoded, d_model, seq_len * batch_size)
+    output_flat = model.output(encoded_flat)  # Shape: (output_dim, seq_len * batch_size)
+    
+    # Reshape back to sequence format: (output_dim, seq_len, batch_size)
+    output_dim = size(output_flat, 1)
+    reshape(output_flat, output_dim, seq_len, batch_size)
 end
 
 # Forward pass with residual connections and normalization

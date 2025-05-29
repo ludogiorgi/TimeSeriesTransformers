@@ -154,7 +154,9 @@ function comprehensive_analysis_callback(model, processor, X_val, y_val, y_data;
     accuracy, predictions = compute_validation_accuracy(model, X_val, y_val; verbose=verbose)
     
     # Initialize fixed parameters for reproducible analysis if not already done
-    initialize_analysis_params!(X_val, y_val)
+    if !haskey(ANALYSIS_PARAMS, "initialized")
+        initialize_analysis_params!(X_val, y_val)
+    end
     
     # Ensure output directory exists
     figures_dir = dirname(save_path)
@@ -246,8 +248,16 @@ function comprehensive_analysis_callback(model, processor, X_val, y_val, y_data;
             current_seq = copy(initial_seq)
             # Generate 20-step trajectory using deterministic (argmax) prediction
             for t in 1:20
-                prob_output = model([current_seq])
-                probs = softmax(prob_output, dims=1)[:, 1]
+                # Convert sequence to proper format for model input using autoregressive format
+                vocab_size = processor.vocab_size
+                seq_len = length(current_seq)
+                X_ar = zeros(Float32, vocab_size, seq_len, 1)
+                for pos in 1:seq_len
+                    X_ar[current_seq[pos], pos, 1] = 1.0f0
+                end
+                
+                prob_output = model(X_ar)
+                probs = softmax(prob_output[:, end, 1])  # Get probs for last position
                 next_cluster = argmax(probs)  # Deterministic prediction
                 push!(traj, next_cluster)
                 # Update sequence by removing first element and appending prediction
@@ -260,33 +270,39 @@ function comprehensive_analysis_callback(model, processor, X_val, y_val, y_data;
         delays = [5, 10, 20]
         for (i, delay) in enumerate(delays)
             # Extract predictions at specific delay step
-            delayed_values = [processor.cluster_centers[traj[delay]] for traj in generated_trajectories]
-            
-            # Get corresponding true values at the same time horizon
-            max_compare_length = min(length(delayed_values), length(true_values_traj) - delay + 1)
-            
-            if max_compare_length > 0
-                delayed_values_trimmed = delayed_values[1:max_compare_length]
-                true_values_shifted = true_values_traj[delay:delay+max_compare_length-1]
+            if delay <= length(generated_trajectories[1])
+                delayed_values = [processor.cluster_centers[traj[delay]] for traj in generated_trajectories if length(traj) >= delay]
                 
-                # Calculate prediction error statistics
-                error = abs.(true_values_shifted - delayed_values_trimmed)
-                mean_error = mean(error)
+                # Get corresponding true values at the same time horizon
+                max_compare_length = min(length(delayed_values), length(true_values_traj) - delay + 1)
                 
-                # Create comparison plot for this delay horizon
-                time_steps = 1:max_compare_length
-                
-                p = plot(time_steps, true_values_shifted, 
-                         color=:black, linewidth=2, label="True (t+$delay)")
-                plot!(p, time_steps, delayed_values_trimmed, 
-                      color=:red, linewidth=2, alpha=0.7, label="Predicted (t→t+$delay)")
-                plot!(p, title="Delay=$delay steps - Avg Error: $(round(mean_error, digits=3)) (Fixed Start)", 
-                      xlabel="Time Steps", ylabel="Value", size=(800, 300))
-                
-                push!(plots_array, p)
+                if max_compare_length > 0
+                    delayed_values_trimmed = delayed_values[1:max_compare_length]
+                    true_values_shifted = true_values_traj[delay:delay+max_compare_length-1]
+                    
+                    # Calculate prediction error statistics
+                    error = abs.(true_values_shifted .- delayed_values_trimmed)  # Fix: use .- for element-wise subtraction
+                    mean_error = mean(error)
+                    
+                    # Create comparison plot for this delay horizon
+                    time_steps = 1:max_compare_length
+                    
+                    p = plot(time_steps, true_values_shifted, 
+                             color=:black, linewidth=2, label="True (t+$delay)")
+                    plot!(p, time_steps, delayed_values_trimmed, 
+                          color=:red, linewidth=2, alpha=0.7, label="Predicted (t→t+$delay)")
+                    plot!(p, title="Delay=$delay steps - Avg Error: $(round(mean_error, digits=3)) (Fixed Start)", 
+                          xlabel="Time Steps", ylabel="Value", size=(800, 300))
+                    
+                    push!(plots_array, p)
+                else
+                    # Handle edge case with insufficient data
+                    p = plot(title="Delay=$delay (insufficient data)", xlabel="Time Steps", ylabel="Value")
+                    push!(plots_array, p)
+                end
             else
-                # Handle edge case with insufficient data
-                p = plot(title="Delay=$delay (insufficient data)", xlabel="Time Steps", ylabel="Value")
+                # Handle case where delay is longer than generated trajectory
+                p = plot(title="Delay=$delay (trajectory too short)", xlabel="Time Steps", ylabel="Value")
                 push!(plots_array, p)
             end
         end
@@ -308,8 +324,17 @@ function comprehensive_analysis_callback(model, processor, X_val, y_val, y_data;
         for step in 1:1000
             # Use pre-determined seed for this step to ensure reproducibility
             Random.seed!(long_traj_seeds[step])
-            prob_output = model([current_sequence_long])
-            probs = softmax(prob_output, dims=1)[:, 1]
+            
+            # Convert sequence to proper format for model input using autoregressive format
+            vocab_size = processor.vocab_size
+            seq_len = length(current_sequence_long)
+            X_ar = zeros(Float32, vocab_size, seq_len, 1)
+            for pos in 1:seq_len
+                X_ar[current_sequence_long[pos], pos, 1] = 1.0f0
+            end
+            
+            prob_output = model(X_ar)
+            probs = softmax(prob_output[:, end, 1])  # Get probs for last position
             next_cluster = argmax(probs)  # Use deterministic prediction
             push!(long_predicted_clusters, next_cluster)
             # Update sequence for next prediction
